@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Agentic Document Intelligence System</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="System navigation">
+        <div class="brand">
+          <span class="brand-mark">ADI</span>
+          <div>
+            <h1>Document Intelligence</h1>
+            <p>Agentic RAG workspace</p>
+          </div>
+        </div>
+
+        <section class="status-panel" aria-label="System status">
+          <div class="status-row">
+            <span>System</span>
+            <strong id="systemStatus">Checking</strong>
+          </div>
+          <div class="status-row">
+            <span>Indexed chunks</span>
+            <strong id="chunkCount">0</strong>
+          </div>
+          <div class="status-row">
+            <span>Gemini</span>
+            <strong id="geminiStatus">-</strong>
+          </div>
+          <div class="status-row">
+            <span>OpenAI</span>
+            <strong id="openaiStatus">-</strong>
+          </div>
+          <div class="status-row">
+            <span>Groq</span>
+            <strong id="groqStatus">-</strong>
+          </div>
+          <div class="status-row">
+            <span>Web fallback</span>
+            <strong id="webStatus">-</strong>
+          </div>
+        </section>
+
+        <section class="upload-panel" aria-label="Document upload">
+          <h2>Knowledge Base</h2>
+          <label class="drop-zone" for="fileInput">
+            <input id="fileInput" type="file" multiple accept=".pdf,.pptx,.txt" />
+            <span>Choose PDFs, PPTX, or TXT files</span>
+          </label>
+          <div class="button-row">
+            <button id="uploadButton" type="button">Upload</button>
+            <button id="ingestButton" type="button" class="secondary">Index</button>
+          </div>
+          <button id="clearButton" type="button" class="danger-button">Reset Knowledge Base</button>
+          <p id="uploadMessage" class="muted">Upload documents, then index them for retrieval.</p>
+        </section>
+
+        <section class="sources-panel" aria-label="Indexed sources">
+          <div class="section-title">
+            <h2>Sources</h2>
+            <button id="refreshButton" type="button" class="icon-button" title="Refresh sources">R</button>
+          </div>
+          <ul id="sourceList" class="source-list"></ul>
+        </section>
+      </aside>
+
+      <main class="workspace">
+        <section class="query-panel" aria-label="Ask documents">
+          <div class="query-heading">
+            <div>
+              <p class="eyebrow">Retrieval &bull; Reasoning &bull; Reports</p>
+              <h2>Ask your internal documents</h2>
+            </div>
+            <div class="format-control" aria-label="Output format">
+              <button class="format-button active" type="button" data-format="json">Answer</button>
+              <button class="format-button" type="button" data-format="pptx">PPT</button>
+              <button class="format-button" type="button" data-format="pdf">PDF</button>
+              <button class="format-button" type="button" data-format="xlsx">Excel</button>
+            </div>
+          </div>
+
+          <div class="model-controls" aria-label="Model settings">
+            <label>
+              <span>Provider</span>
+              <select id="modelProvider">
+                <option value="gemini">Gemini</option>
+                <option value="openai">OpenAI</option>
+                <option value="groq">Groq</option>
+              </select>
+            </label>
+            <label>
+              <span>Model</span>
+              <input id="modelName" type="text" value="gemini-2.5-flash" />
+            </label>
+            <label>
+              <span>Temperature</span>
+              <input id="temperatureInput" type="number" min="0" max="2" step="0.1" value="0.2" />
+            </label>
+            <label>
+              <span>Max tokens</span>
+              <input id="maxTokensInput" type="number" min="256" max="8000" step="128" value="1400" />
+            </label>
+            <label>
+              <span>Top P</span>
+              <input id="topPInput" type="number" min="0.01" max="1" step="0.01" value="0.9" />
+            </label>
+          </div>
+
+          <form id="questionForm" class="question-form">
+            <textarea
+              id="queryInput"
+              rows="4"
+              placeholder="Ask a question, for example: How many leaves are allowed for interns?"
+            ></textarea>
+            <button id="askButton" type="submit">Run Agent</button>
+          </form>
+        </section>
+
+        <section class="answer-panel" aria-label="Agent response">
+          <div class="answer-header">
+            <div>
+              <p class="eyebrow">Final Response</p>
+              <h2 id="answerTitle">Ready for a question</h2>
+            </div>
+            <span id="confidenceBadge" class="badge">Idle</span>
+          </div>
+          <div id="answerBox" class="answer-box">
+            Upload or index documents, ask a question, and the agent will retrieve evidence, reason over it, and generate a cited response.
+          </div>
+          <div id="pptWorkflow" class="draft-panel hidden" aria-label="PPT draft workflow">
+            <div class="draft-header">
+              <strong>PPT Draft Review</strong>
+              <span>Review, refine, then export</span>
+            </div>
+            <label class="draft-label" for="draftEditor">Draft answer</label>
+            <textarea id="draftEditor" rows="10" class="draft-editor" placeholder="The generated draft will appear here before PPT export."></textarea>
+            <label class="draft-label" for="refinePrompt">Refinement prompt</label>
+            <textarea id="refinePrompt" rows="3" class="draft-refine" placeholder="Example: Make this more detailed, add competitor positioning, and improve slide-ready structure."></textarea>
+            <div class="draft-actions">
+              <button id="refineButton" type="button" class="secondary">Refine Draft</button>
+              <button id="generatePptButton" type="button">Generate PPT From Draft</button>
+            </div>
+          </div>
+          <div id="timingPanel" class="timing-panel" aria-label="Query timings">
+            <div class="timing-header">
+              <strong>Query Timing</strong>
+              <span id="totalTiming">-</span>
+            </div>
+            <div id="timingGrid" class="timing-grid"></div>
+          </div>
+          <div id="sourceChips" class="source-chips"></div>
+        </section>
+
+        <section class="architecture-panel" aria-label="Architecture overview">
+          <h2>Project Architecture</h2>
+          <div class="architecture-grid">
+            <div class="arch-step">
+              <span>1</span>
+              <strong>Document Ingestion</strong>
+              <p>PDF, PPTX, and text files are extracted and split into searchable chunks.</p>
+            </div>
+            <div class="arch-step">
+              <span>2</span>
+              <strong>Vector Memory</strong>
+              <p>Chunks are embedded with Gemini and stored in ChromaDB with source metadata.</p>
+            </div>
+            <div class="arch-step">
+              <span>3</span>
+              <strong>Agent Router</strong>
+              <p>LangGraph retrieves local evidence, then routes to Gemini, OpenAI, or Groq generation.</p>
+            </div>
+            <div class="arch-step">
+              <span>4</span>
+              <strong>Report Generator</strong>
+              <p>Answers can be returned in the UI or exported as PPT, PDF, and Excel reports.</p>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
