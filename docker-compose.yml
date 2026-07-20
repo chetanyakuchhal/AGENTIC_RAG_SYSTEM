@@ -1,0 +1,13 @@
+services:
+  agentic-rag-system:
+    build: .
+    container_name: agentic-rag-system
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./db:/app/db
+      - ./outputs:/app/outputs
+    restart: unless-stopped

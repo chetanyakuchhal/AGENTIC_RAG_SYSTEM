@@ -335,6 +335,41 @@ button:disabled {
   box-shadow: 0 0 0 3px rgba(25, 103, 210, 0.12);
 }
 
+.ppt-template-control {
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfe;
+}
+
+.ppt-template-control label {
+  display: grid;
+  gap: 6px;
+}
+
+.ppt-template-control span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.ppt-template-control select {
+  width: 100%;
+  min-height: 38px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--ink);
+  padding: 0 10px;
+  outline: none;
+}
+
+.ppt-template-control select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(25, 103, 210, 0.12);
+}
+
 .question-form {
   display: grid;
   grid-template-columns: 1fr auto;

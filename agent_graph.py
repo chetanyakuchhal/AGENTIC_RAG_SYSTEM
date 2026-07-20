@@ -1,4 +1,5 @@
 import os
+import re
 import time
 from typing import TypedDict
 
@@ -48,7 +49,9 @@ def _model_settings(state: AgentState):
     max_tokens = int(state.get("max_tokens", 1400))
     top_p = float(state.get("top_p", 0.9))
 
-    max_token_limit = 4096 if provider == "groq" else 8000
+    # Groq free/on-demand tiers often enforce a strict tokens-per-minute budget.
+    # Keep completion budget modest because prompt + evidence + output all count.
+    max_token_limit = 1800 if provider == "groq" else 8000
 
     return {
         "provider": provider,
@@ -106,7 +109,7 @@ def _build_llm(state: AgentState):
 def _build_web_search_tool():
     if not os.getenv("TAVILY_API_KEY"):
         return None
-    return TavilySearch(max_results=3)
+    return TavilySearch(max_results=5)
 
 
 db_manager = VectorStoreManager()
@@ -130,6 +133,71 @@ def _is_generation_request(query):
         "report",
     ]
     return any(phrase in query for phrase in generation_phrases)
+
+
+def _is_market_portfolio_request(query):
+    normalized = query.lower()
+    return "market portfolio" in normalized or ("portfolio" in normalized and any(
+        word in normalized for word in ["market", "company", "business", "financial", "revenue"]
+    ))
+
+
+def _needs_current_financials(query):
+    normalized = query.lower()
+    finance_terms = [
+        "financial",
+        "revenue",
+        "profit",
+        "profitability",
+        "growth",
+        "margin",
+        "market position",
+        "market share",
+        "valuation",
+        "earnings",
+        "annual report",
+        "10-k",
+        "quarter",
+    ]
+    return _is_market_portfolio_request(query) or any(term in normalized for term in finance_terms)
+
+
+def _financial_search_query(query):
+    clean = re.sub(r"\s+", " ", query).strip()
+    if not _needs_current_financials(clean):
+        return clean
+    return (
+        f"{clean} latest annual report investor relations revenue profitability growth "
+        "gross margin net income free cash flow market position competitors"
+    )
+
+
+def _trim_context_for_model(context, provider, presentation_mode=False):
+    clean = re.sub(r"\n{3,}", "\n\n", context or "").strip()
+    if not clean:
+        return ""
+
+    if provider == "groq":
+        limit = 4200 if presentation_mode else 5200
+    else:
+        limit = 12000 if presentation_mode else 9000
+
+    if len(clean) <= limit:
+        return clean
+
+    blocks = [block.strip() for block in clean.split("\n\n") if block.strip()]
+    selected = []
+    current_len = 0
+    for block in blocks:
+        compact_block = re.sub(r"\s+", " ", block).strip()
+        if current_len + len(compact_block) + 2 > limit:
+            remaining = limit - current_len - 2
+            if remaining > 500:
+                selected.append(compact_block[:remaining].rsplit(" ", 1)[0])
+            break
+        selected.append(compact_block)
+        current_len += len(compact_block) + 2
+    return "\n\n".join(selected).strip()
 
 
 def _format_source(metadata, score=None):
@@ -192,6 +260,7 @@ def router_node(state: AgentState):
     query = state["query"]
     is_generation_request = _is_generation_request(query)
     current_llm = _build_llm(state)
+    settings = _model_settings(state)
 
     if current_llm is None:
         has_context = bool(state.get("context", "").strip())
@@ -200,10 +269,13 @@ def router_node(state: AgentState):
             **_timing_update(state, "router", started_at),
         }
 
-    context = state.get("context", "").strip()
+    context = _trim_context_for_model(state.get("context", "").strip(), settings["provider"])
 
     if not context:
         print("[Router Agent] No local documents found.")
+        if _needs_current_financials(query) and web_search_tool is not None:
+            print("[Router Agent] Current financial request detected. Using web evidence.")
+            return {"route": "web_search", **_timing_update(state, "router", started_at)}
         if is_generation_request:
             print("[Router Agent] Generation request detected. Using LLM general knowledge.")
             return {"route": "generate", **_timing_update(state, "router", started_at)}
@@ -235,6 +307,9 @@ INSUFFICIENT
     print(f"[Router Agent] Decision: {decision}")
 
     if "INSUFFICIENT" in decision:
+        if _needs_current_financials(query) and web_search_tool is not None:
+            print("[Router Agent] Retrieved context is weak for current financials. Using web evidence.")
+            return {"route": "web_search", **_timing_update(state, "router", started_at)}
         if is_generation_request:
             print("[Router Agent] Retrieved context is weak. Using LLM general knowledge.")
             return {"route": "generate", **_timing_update(state, "router", started_at)}
@@ -251,8 +326,9 @@ def web_search_node(state: AgentState):
             **_timing_update(state, "web_search", started_at),
         }
 
+    search_query = _financial_search_query(state["query"])
     print("[Web Search Agent] Searching external sources...")
-    search_results = web_search_tool.invoke({"query": state["query"]})
+    search_results = web_search_tool.invoke({"query": search_query})
 
     web_blocks = []
     web_sources = []
@@ -315,6 +391,7 @@ def generator_node(state: AgentState):
     )
     has_evidence = bool(combined_context.strip()) and state.get("confidence") != "low"
     presentation_mode = bool(state.get("presentation_mode"))
+    evidence_context = _trim_context_for_model(combined_context, settings["provider"], presentation_mode)
 
     if current_llm is None:
         if settings["provider"] == "openai":
@@ -334,7 +411,60 @@ def generator_node(state: AgentState):
             **_timing_update(state, "generator", started_at),
         }
 
-    if presentation_mode:
+    if presentation_mode and settings["provider"] == "groq":
+        prompt = f"""
+You are a senior business analyst creating a slide-ready market portfolio draft.
+
+Use evidence when relevant. If evidence is weak, use general business knowledge, but do not invent exact financial numbers.
+For public companies, financial values must include a period/source label or say "Verify from latest filings".
+Write concise, non-repetitive content for an 8-slide PPT.
+
+Required output order and exact headings:
+
+Market Portfolio:
+- Title line: Market Portfolio for <Company or Platform>
+
+Company Overview:
+- Markdown table: Company | Industry | Target Customers | Core Value Proposition
+
+Financial Snapshot:
+- Markdown table exactly: Metric | Latest Value | Period / Source | Business Meaning
+- 5 rows: revenue, revenue growth, profitability/net income, gross margin, free cash flow/cash/customer signal
+
+Product Portfolio:
+- Markdown table: Category | Products | Business Role | Priority
+- 5 to 6 rows only
+
+Market Segments And Geographic Reach:
+- Markdown table: Segment | Description | Primary Need | Commercial Potential
+- 4 to 5 rows only
+
+Competitive Landscape And Positioning:
+- Markdown table: Competitor | Strength | Weakness Compared To The Company | Relative Threat
+- 4 competitors only
+
+Growth Opportunities And Strategic Priorities:
+- 4 concise bullets with action, KPI/signal, and business impact
+
+References:
+- List source names only. If none were used, write: LLM general knowledge
+
+Rules:
+- Keep the full response under 1200 words.
+- Prefer numbers, periods, margins, revenue/growth/profitability signals when evidenced.
+- Label uncertain values as estimates or "Verify from latest filings".
+- Do not mention retrieval failure or irrelevant evidence.
+- Do not use citations in the main body.
+
+User question:
+{state["query"]}
+
+Collected evidence:
+{evidence_context if has_evidence else "No relevant evidence was found."}
+
+Final draft:
+"""
+    elif presentation_mode:
         prompt = f"""
 You are a senior business analyst preparing a presentation-ready market portfolio draft.
 The draft will be reviewed by the user first and then converted into a PowerPoint deck.
@@ -350,6 +480,12 @@ Quality bar:
 - Make the output slide-ready: crisp headings, dense bullets, specific business language, no filler.
 - Prefer analysis over description: explain market logic, competitive implications, risks, and recommendations.
 - Include realistic qualitative assessments when exact numbers are unavailable; do not invent precise fake statistics.
+- For public companies, prioritize latest reported company/investor evidence for revenue, profitability, margins, growth,
+  cash flow, customer count, ARPU, and guidance before using general knowledge.
+- Separate exact reported figures from estimates. Every financial number must include a period such as FY2025, Q1 FY2026,
+  TTM, or "estimate" when the period is not verifiable from evidence.
+- If web/company evidence is unavailable, do not pretend the numbers are current; use "verify from latest filings" in the
+  value or period field and still explain what the metric means.
 - Make the analysis technical, statistical, and numbers-oriented wherever possible.
 - Include measurable indicators such as customer segments, service categories, pricing/value signals, growth rates, adoption metrics,
   revenue contribution levels, risk severity, and KPI targets when they are supported by evidence or clearly framed as estimates.
@@ -382,6 +518,15 @@ Company Overview:
 - Include a compact markdown table with: Company, Industry, Target Customers, Core Value Proposition
 - If exact founded/headquarters details are uncertain, use "Verify from latest company sources" rather than inventing precision
 - Include measurable business context where possible, such as public company status, primary cloud category, or customer-size focus
+
+Financial Snapshot:
+- Include a markdown table with exactly this header:
+  | Metric | Latest Value | Period / Source | Business Meaning |
+  | --- | --- | --- | --- |
+- Include 5 to 7 rows covering revenue, revenue growth, profitability or net income, gross margin, free cash flow or cash position,
+  customer/ARPU signal, and guidance or market valuation when available
+- Use exact reported numbers only when available from collected evidence; otherwise write "Verify from latest filings" for the value
+- Keep each Business Meaning cell analytical and concise, explaining what the number says about scale, efficiency, growth, or risk
 
 Product Portfolio:
 - Include a markdown table with columns: Category | Products | Business Role | Priority
@@ -472,7 +617,7 @@ User question:
 {state["query"]}
 
 Collected evidence:
-{combined_context if has_evidence else "No relevant evidence was found."}
+{evidence_context if has_evidence else "No relevant evidence was found."}
 
 Final draft:
 """
@@ -501,7 +646,7 @@ User question:
 {state["query"]}
 
 Collected evidence:
-{combined_context if has_evidence else "No relevant evidence was found."}
+{evidence_context if has_evidence else "No relevant evidence was found."}
 
 Final answer:
 """

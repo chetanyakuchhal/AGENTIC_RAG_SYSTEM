@@ -58,6 +58,55 @@ agentic-rag-system/
 
 ## Setup
 
+### Option 1: Run With Docker
+
+This is the recommended way to share the project with a mentor because Docker creates the same runtime environment on any machine.
+
+1. Create the environment file:
+
+```bash
+cp .env.example .env
+```
+
+2. Add your API keys inside `.env`:
+
+```bash
+GOOGLE_API_KEY=your_google_gemini_api_key
+OPENAI_API_KEY=your_openai_api_key
+GROQ_API_KEY=your_groq_api_key
+TAVILY_API_KEY=your_tavily_api_key
+```
+
+`GOOGLE_API_KEY` is required for embeddings and document indexing. `OPENAI_API_KEY`, `GROQ_API_KEY`, and `TAVILY_API_KEY` are only required when using those providers/features.
+
+3. Build and start the app:
+
+```bash
+docker compose up --build
+```
+
+4. Open the UI:
+
+```text
+http://localhost:8000
+```
+
+Docker mounts these folders so data remains available after the container restarts:
+
+```text
+data/      uploaded documents
+db/        persistent ChromaDB vector database
+outputs/   generated PPTX, PDF, and Excel reports
+```
+
+To stop the app:
+
+```bash
+docker compose down
+```
+
+### Option 2: Run Locally With Python
+
 1. Install dependencies:
 
 ```bash

@@ -26,6 +26,8 @@ const elements = {
   temperatureInput: document.querySelector("#temperatureInput"),
   maxTokensInput: document.querySelector("#maxTokensInput"),
   topPInput: document.querySelector("#topPInput"),
+  pptTemplateControl: document.querySelector("#pptTemplateControl"),
+  pptTemplate: document.querySelector("#pptTemplate"),
   askButton: document.querySelector("#askButton"),
   answerTitle: document.querySelector("#answerTitle"),
   answerBox: document.querySelector("#answerBox"),
@@ -90,6 +92,10 @@ function renderAnswer(result) {
 
 function showPptWorkflow(show) {
   elements.pptWorkflow.classList.toggle("hidden", !show);
+}
+
+function showPptTemplateControl(show) {
+  elements.pptTemplateControl.classList.toggle("hidden", !show);
 }
 
 function renderTimings(timings) {
@@ -164,12 +170,17 @@ function currentModelSettings() {
     : provider === "groq"
       ? "llama-3.1-8b-instant"
       : "gemini-2.5-flash";
-  const maxTokenLimit = provider === "groq" ? 4096 : 8000;
+  const maxTokenLimit = provider === "groq" ? 1800 : 8000;
+  const requestedMaxTokens = Number(elements.maxTokensInput.value || 1400);
+  const maxTokens = Math.min(requestedMaxTokens, maxTokenLimit);
+  if (requestedMaxTokens !== maxTokens) {
+    elements.maxTokensInput.value = String(maxTokens);
+  }
   return {
     model_provider: provider,
     model_name: elements.modelName.value.trim() || fallbackModel,
     temperature: Number(elements.temperatureInput.value || 0.2),
-    max_tokens: Math.min(Number(elements.maxTokensInput.value || 1400), maxTokenLimit),
+    max_tokens: maxTokens,
     top_p: Number(elements.topPInput.value || 0.9),
   };
 }
@@ -181,9 +192,9 @@ function applyProviderDefaults() {
     elements.maxTokensInput.max = "8000";
   } else if (provider === "groq") {
     elements.modelName.value = "llama-3.1-8b-instant";
-    elements.maxTokensInput.max = "4096";
-    if (Number(elements.maxTokensInput.value) > 4096) {
-      elements.maxTokensInput.value = "4096";
+    elements.maxTokensInput.max = "1800";
+    if (Number(elements.maxTokensInput.value) > 1800) {
+      elements.maxTokensInput.value = "1800";
     }
   } else {
     elements.modelName.value = "gemini-2.5-flash";
@@ -325,6 +336,7 @@ async function askQuestion(event) {
         query,
         output_format: requestFormat,
         presentation_mode: state.format === "pptx",
+        ppt_template: elements.pptTemplate.value,
         ...currentModelSettings(),
       }),
     });
@@ -443,6 +455,7 @@ async function generatePptFromDraft() {
         query,
         output_format: "pptx",
         custom_answer,
+        ppt_template: elements.pptTemplate.value,
         ...currentModelSettings(),
       }),
     });
@@ -475,6 +488,7 @@ elements.formatButtons.forEach((button) => {
     state.format = button.dataset.format;
     elements.formatButtons.forEach((item) => item.classList.remove("active"));
     button.classList.add("active");
+    showPptTemplateControl(state.format === "pptx");
   });
 });
 
@@ -491,5 +505,6 @@ elements.generatePptButton.addEventListener("click", generatePptFromDraft);
 elements.questionForm.addEventListener("submit", askQuestion);
 
 applyProviderDefaults();
+showPptTemplateControl(state.format === "pptx");
 refreshStatus();
 renderTimings({});

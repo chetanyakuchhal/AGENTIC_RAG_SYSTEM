@@ -53,6 +53,7 @@ class QueryRequest(BaseModel):
     top_p: float = 0.9
     custom_answer: str | None = None
     presentation_mode: bool = False
+    ppt_template: str = "strategy_brief"
 
 
 class RefineRequest(BaseModel):
@@ -77,7 +78,7 @@ def _normalized_model_settings(request: QueryRequest):
         default_model = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
     else:
         default_model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-    max_token_limit = 4096 if provider == "groq" else 8000
+    max_token_limit = 1800 if provider == "groq" else 8000
     return {
         "model_provider": provider,
         "model_name": request.model_name or default_model,
@@ -90,6 +91,11 @@ def _normalized_model_settings(request: QueryRequest):
 def _timing_headers(timings):
     compact = {key: round(value, 4) for key, value in timings.items()}
     return {"X-Agent-Timings": json.dumps(compact, separators=(",", ":"))}
+
+
+def _normalized_ppt_template(template):
+    template = (template or "strategy_brief").strip().lower()
+    return template if template in {"strategy_brief", "financial_review", "consulting_memo"} else "strategy_brief"
 
 
 def _document_files():
@@ -380,6 +386,7 @@ def _extract_named_sections(text):
     header_aliases = {
         "Market Portfolio": ["Market Portfolio", "DigitalOcean Market Portfolio"],
         "Company Overview": ["Company Overview"],
+        "Financial Snapshot": ["Financial Snapshot", "Financial Overview", "Financial Performance", "Revenue And Profitability"],
         "Product Portfolio": ["Product Portfolio"],
         "Target Market Segments": ["Target Market Segments", "Target Segments", "Market Segments And Geographic Reach"],
         "Geographic Presence": ["Geographic Presence", "Geography"],
@@ -503,9 +510,11 @@ def _parse_first_markdown_table(section_text):
         return None
 
     headers = [_clean_ppt_text(cell)[:42] for cell in rows[0]]
+    financial_headers = {"metric", "latest value", "period / source", "business meaning"}
+    max_rows = 5 if financial_headers.issubset({header.lower() for header in headers}) else 6
     data_rows = []
-    for row in rows[1:9]:
-        cleaned = [_clean_ppt_text(cell)[:95] for cell in row]
+    for row in rows[1:1 + max_rows]:
+        cleaned = [_clean_ppt_text(cell) for cell in row]
         if any(cleaned):
             data_rows.append(cleaned)
 
@@ -770,6 +779,7 @@ def _combine_bullets(*sections, limit=6):
 def _build_market_portfolio_slides(named_sections):
     market_keys = {
         "company overview",
+        "financial snapshot",
         "product portfolio",
         "target market segments",
         "competitive landscape",
@@ -788,6 +798,13 @@ def _build_market_portfolio_slides(named_sections):
             "Audience, category, and core value proposition",
             named_sections["company overview"],
             "overview",
+        ))
+    if "financial snapshot" in named_sections:
+        slides.append(_make_table_slide(
+            "Financial Snapshot Quantifies Scale And Momentum",
+            "Revenue, profitability, growth, and operating signals",
+            named_sections["financial snapshot"],
+            "metrics",
         ))
     if "product portfolio" in named_sections:
         slides.append(_make_table_slide(
@@ -999,6 +1016,44 @@ PPT_SOFT_BLUE = (229, 240, 255)
 PPT_SOFT_TEAL = (229, 247, 242)
 PPT_WARN = (190, 82, 65)
 PPT_GREEN = (36, 145, 105)
+PPT_INDIGO = (79, 70, 229)
+PPT_EMERALD = (5, 150, 105)
+PPT_SLATE = (30, 41, 59)
+PPT_LIGHT_INDIGO = (238, 242, 255)
+PPT_LIGHT_EMERALD = (236, 253, 245)
+
+PPT_THEMES = {
+    "strategy_brief": {
+        "name": "Classic Consulting Layout",
+        "accent": PPT_BLUE,
+        "secondary": PPT_TEAL,
+        "navy": PPT_NAVY,
+        "bg": PPT_BG,
+        "muted": PPT_MUTED,
+        "soft": PPT_SOFT_BLUE,
+        "style": "classic",
+    },
+    "financial_review": {
+        "name": "Split-Column Layout",
+        "accent": PPT_EMERALD,
+        "secondary": (14, 116, 144),
+        "navy": (15, 46, 43),
+        "bg": (246, 252, 249),
+        "muted": (81, 105, 99),
+        "soft": PPT_LIGHT_EMERALD,
+        "style": "sidebar",
+    },
+    "consulting_memo": {
+        "name": "Card-Based Layout",
+        "accent": PPT_INDIGO,
+        "secondary": (14, 165, 233),
+        "navy": PPT_SLATE,
+        "bg": (248, 250, 255),
+        "muted": (99, 102, 129),
+        "soft": PPT_LIGHT_INDIGO,
+        "style": "editorial",
+    },
+}
 
 SECTION_ICONS = {
     "overview": "◼",
@@ -1065,11 +1120,81 @@ def _compact_bullets(items, limit=6, char_limit=145):
     return compact
 
 
+def _shorten_table_text(text, limit=72):
+    clean = _clean_ppt_text(text)
+    clean = re.sub(r"\s+", " ", clean).strip()
+    if len(clean) <= limit:
+        return clean
+
+    sentence_parts = re.split(r"(?<=[.!?])\s+", clean)
+    if sentence_parts and 18 <= len(sentence_parts[0]) <= limit:
+        return sentence_parts[0].rstrip(".")
+
+    pre_replacements = [
+        (r"\bexceeding initial guidance\b", "beating guidance"),
+        (r"\bdemonstrating strong execution on growth strategy\b", "showing strong execution"),
+        (r"\bindicating strong market momentum\b", "showing market momentum"),
+        (r"\bindicating operational efficiency and scalability\b", "showing efficiency and scale"),
+    ]
+    for pattern, replacement in pre_replacements:
+        clean = re.sub(pattern, replacement, clean, flags=re.I)
+    if len(clean) <= limit:
+        return clean
+
+    clauses = re.split(
+        r"\s*(?:;|, and|, but|, while|, exceeding|, indicating|, demonstrating|, driving)\s*",
+        clean,
+        flags=re.I,
+    )
+    clauses = [clause.strip(" ,.;:-") for clause in clauses if clause.strip(" ,.;:-")]
+    if clauses:
+        selected = []
+        current = ""
+        for clause in clauses:
+            candidate = "; ".join([*selected, clause])
+            if len(candidate) > limit:
+                break
+            selected.append(clause)
+            current = candidate
+        if current and len(current) >= 18:
+            return current.rstrip(" ,.;:-")
+
+    compact_replacements = [
+        (r"\bAccelerating\b", "Fast"),
+        (r"\bdemonstrating\b", "showing"),
+        (r"\bindicating\b", "showing"),
+        (r"\bcompared to\b", "vs."),
+        (r"\boperational efficiency\b", "efficiency"),
+        (r"\bmarket leadership\b", "leadership"),
+        (r"\bcustomer acquisition\b", "acquisition"),
+        (r"\bcustomer retention\b", "retention"),
+    ]
+    compact = clean
+    for pattern, replacement in compact_replacements:
+        compact = re.sub(pattern, replacement, compact, flags=re.I)
+    if len(compact) <= limit:
+        return compact
+
+    cut = compact[:limit].rsplit(" ", 1)[0].rstrip(" ,.;:-")
+    trailing_fragments = {
+        "and", "or", "but", "while", "with", "without", "through", "from",
+        "to", "of", "on", "for", "initial", "strong", "market", "growth",
+    }
+    words = cut.split()
+    while words and words[-1].lower() in trailing_fragments:
+        words.pop()
+    return " ".join(words) if words else cut
+
+
 def _split_label(text):
     match = re.match(r"^([^:\n]{2,48}):\s*(.+)$", text)
     if not match:
         return None, text
     return match.group(1), match.group(2)
+
+
+def _ppt_theme(template):
+    return PPT_THEMES.get(_normalized_ppt_template(template), PPT_THEMES["strategy_brief"])
 
 
 def _add_label_detail_runs(paragraph, text, size, label_color=PPT_BLUE, detail_color=PPT_INK):
@@ -1088,20 +1213,35 @@ def _add_label_detail_runs(paragraph, text, size, label_color=PPT_BLUE, detail_c
         _set_run_style(run, size=size, color=detail_color)
 
 
-def _apply_slide_background(slide):
+def _apply_slide_background(slide, template="strategy_brief"):
+    theme = _ppt_theme(template)
     background = slide.background
     fill = background.fill
     fill.solid()
-    fill.fore_color.rgb = RGBColor(*PPT_BG)
+    fill.fore_color.rgb = RGBColor(*theme["bg"])
 
-    top = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0), Inches(0), Inches(13.333), Inches(0.16))
+    if theme["style"] == "sidebar":
+        side = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0), Inches(0), Inches(0.42), Inches(7.5))
+        side.fill.solid()
+        side.fill.fore_color.rgb = RGBColor(*theme["navy"])
+        side.line.fill.background()
+
+        accent = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0.42), Inches(0), Inches(0.08), Inches(7.5))
+        accent.fill.solid()
+        accent.fill.fore_color.rgb = RGBColor(*theme["accent"])
+        accent.line.fill.background()
+        return
+
+    top_height = 0.16 if theme["style"] == "classic" else 0.52
+    top = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0), Inches(0), Inches(13.333), Inches(top_height))
     top.fill.solid()
-    top.fill.fore_color.rgb = RGBColor(*PPT_NAVY)
+    top.fill.fore_color.rgb = RGBColor(*theme["navy"])
     top.line.fill.background()
 
-    accent = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0), Inches(0.16), Inches(13.333), Inches(0.045))
+    accent_y = top_height
+    accent = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0), Inches(accent_y), Inches(13.333), Inches(0.045))
     accent.fill.solid()
-    accent.fill.fore_color.rgb = RGBColor(*PPT_TEAL)
+    accent.fill.fore_color.rgb = RGBColor(*theme["accent"])
     accent.line.fill.background()
 
 
@@ -1113,7 +1253,8 @@ def _text_size_for_count(count, base=16):
     return base + 1
 
 
-def _add_deck_label(slide):
+def _add_deck_label(slide, template="strategy_brief"):
+    theme = _ppt_theme(template)
     label = slide.shapes.add_textbox(Inches(10.35), Inches(0.36), Inches(2.32), Inches(0.28))
     frame = label.text_frame
     frame.clear()
@@ -1121,35 +1262,49 @@ def _add_deck_label(slide):
     paragraph.alignment = PP_ALIGN.RIGHT
     run = paragraph.add_run()
     run.text = "Agentic Document Intelligence"
-    _set_run_style(run, size=8.5, bold=True, color=PPT_MUTED)
+    color = (235, 242, 255) if theme["style"] == "editorial" else theme["muted"]
+    _set_run_style(run, size=8.5, bold=True, color=color)
 
 
-def _add_section_kicker(slide, text):
-    chip = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(0.72), Inches(0.34), Inches(1.55), Inches(0.32))
+def _add_section_kicker(slide, text, template="strategy_brief"):
+    theme = _ppt_theme(template)
+    x = 0.78 if theme["style"] != "sidebar" else 0.72
+    y = 0.34 if theme["style"] != "editorial" else 0.68
+    chip = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(x), Inches(y), Inches(1.55), Inches(0.32))
     chip.fill.solid()
-    chip.fill.fore_color.rgb = RGBColor(230, 244, 241)
-    chip.line.color.rgb = RGBColor(196, 229, 220)
+    chip.fill.fore_color.rgb = RGBColor(*theme["soft"])
+    chip.line.color.rgb = RGBColor(*theme["accent"])
 
-    box = slide.shapes.add_textbox(Inches(0.82), Inches(0.39), Inches(1.35), Inches(0.2))
+    box = slide.shapes.add_textbox(Inches(x + 0.1), Inches(y + 0.05), Inches(1.35), Inches(0.2))
     frame = box.text_frame
     frame.clear()
     paragraph = frame.paragraphs[0]
     paragraph.alignment = PP_ALIGN.CENTER
     run = paragraph.add_run()
     run.text = text.upper()
-    _set_run_style(run, size=8.5, bold=True, color=(25, 117, 96))
+    _set_run_style(run, size=8.5, bold=True, color=theme["accent"])
 
 
-def _add_title(slide, title, subtitle=None, kicker="analysis"):
-    _add_section_kicker(slide, kicker)
-    _add_deck_label(slide)
+def _add_title(slide, title, subtitle=None, kicker="analysis", template="strategy_brief"):
+    theme = _ppt_theme(template)
+    _add_section_kicker(slide, kicker, template)
+    _add_deck_label(slide, template)
 
-    icon_box = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(0.72), Inches(0.76), Inches(0.46), Inches(0.46))
+    title_x = 1.28
+    icon_x = 0.72
+    title_y = 0.66
+    if theme["style"] == "sidebar":
+        title_x = 1.52
+        icon_x = 0.78
+    elif theme["style"] == "editorial":
+        title_y = 0.9
+
+    icon_box = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(icon_x), Inches(title_y + 0.1), Inches(0.46), Inches(0.46))
     icon_box.fill.solid()
-    icon_box.fill.fore_color.rgb = RGBColor(*PPT_BLUE)
+    icon_box.fill.fore_color.rgb = RGBColor(*theme["accent"])
     icon_box.line.fill.background()
 
-    icon_text = slide.shapes.add_textbox(Inches(0.72), Inches(0.825), Inches(0.46), Inches(0.22))
+    icon_text = slide.shapes.add_textbox(Inches(icon_x), Inches(title_y + 0.165), Inches(0.46), Inches(0.22))
     icon_frame = icon_text.text_frame
     icon_frame.clear()
     icon_frame.paragraphs[0].alignment = PP_ALIGN.CENTER
@@ -1157,7 +1312,7 @@ def _add_title(slide, title, subtitle=None, kicker="analysis"):
     icon_run.text = SECTION_ICONS.get(kicker, "●")
     _set_run_style(icon_run, size=13, bold=True, color=(255, 255, 255))
 
-    title_box = slide.shapes.add_textbox(Inches(1.28), Inches(0.66), Inches(10.25), Inches(1.16))
+    title_box = slide.shapes.add_textbox(Inches(title_x), Inches(title_y), Inches(10.25), Inches(1.16))
     title_frame = title_box.text_frame
     title_frame.word_wrap = True
     title_frame.clear()
@@ -1171,19 +1326,21 @@ def _add_title(slide, title, subtitle=None, kicker="analysis"):
         title_size = 32
     else:
         title_size = 36
-    _set_run_style(title_run, size=title_size, bold=True, color=PPT_NAVY)
+    _set_run_style(title_run, size=title_size, bold=True, color=theme["navy"])
 
     if subtitle:
-        subtitle_box = slide.shapes.add_textbox(Inches(1.3), Inches(2.0), Inches(10.95), Inches(0.4))
+        subtitle_y = 2.0 if theme["style"] != "editorial" else 2.08
+        subtitle_box = slide.shapes.add_textbox(Inches(title_x + 0.02), Inches(subtitle_y), Inches(10.95), Inches(0.4))
         subtitle_frame = subtitle_box.text_frame
         subtitle_frame.clear()
         subtitle_run = subtitle_frame.paragraphs[0].add_run()
         subtitle_run.text = subtitle[:145]
-        _set_run_style(subtitle_run, size=16, color=PPT_MUTED)
+        _set_run_style(subtitle_run, size=16, color=theme["muted"])
 
-    divider = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0.74), Inches(2.32), Inches(11.85), Inches(0.025))
+    divider_x = 0.74 if theme["style"] != "sidebar" else 0.82
+    divider = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(divider_x), Inches(2.32), Inches(11.85), Inches(0.025))
     divider.fill.solid()
-    divider.fill.fore_color.rgb = RGBColor(*PPT_LINE)
+    divider.fill.fore_color.rgb = RGBColor(*theme["accent"] if theme["style"] != "classic" else PPT_LINE)
     divider.line.fill.background()
 
 
@@ -1202,26 +1359,108 @@ def _add_body(slide, text, top=1.62, height=4.95, size=15):
         _set_run_style(run, size=size, color=(39, 50, 68))
 
 
-def _add_cover_body(slide, text):
+def _add_cover_body(slide, text, x=0.88, y=5.55, color=(225, 235, 247)):
     for index, line in enumerate(text.splitlines()):
         paragraph_text = line if index == 0 else f"Prepared {line}"
-        box = slide.shapes.add_textbox(Inches(0.88), Inches(5.55 + index * 0.32), Inches(5.9), Inches(0.3))
+        box = slide.shapes.add_textbox(Inches(x), Inches(y + index * 0.32), Inches(5.9), Inches(0.3))
         frame = box.text_frame
         frame.clear()
         run = frame.paragraphs[0].add_run()
         run.text = paragraph_text
-        _set_run_style(run, size=13 if index == 0 else 11.5, bold=index == 0, color=(225, 235, 247))
+        _set_run_style(run, size=13 if index == 0 else 11.5, bold=index == 0, color=color)
 
 
-def _add_cover_slide(slide, title, subtitle, body):
+def _add_cover_slide(slide, title, subtitle, body, template="strategy_brief"):
+    theme = _ppt_theme(template)
     background = slide.background
     fill = background.fill
     fill.solid()
-    fill.fore_color.rgb = RGBColor(*PPT_NAVY)
+    fill.fore_color.rgb = RGBColor(*theme["navy"])
+
+    if theme["style"] == "sidebar":
+        fill.fore_color.rgb = RGBColor(245, 252, 249)
+        side = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0), Inches(0), Inches(3.45), Inches(7.5))
+        side.fill.solid()
+        side.fill.fore_color.rgb = RGBColor(*theme["navy"])
+        side.line.fill.background()
+
+        accent = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(3.45), Inches(0), Inches(0.12), Inches(7.5))
+        accent.fill.solid()
+        accent.fill.fore_color.rgb = RGBColor(*theme["accent"])
+        accent.line.fill.background()
+
+        title_box = slide.shapes.add_textbox(Inches(4.05), Inches(1.28), Inches(7.9), Inches(2.05))
+        frame = title_box.text_frame
+        frame.word_wrap = True
+        frame.clear()
+        run = frame.paragraphs[0].add_run()
+        run.text = title[:95]
+        _set_run_style(run, size=42, bold=True, color=theme["navy"])
+
+        subtitle_box = slide.shapes.add_textbox(Inches(4.08), Inches(3.5), Inches(6.8), Inches(0.48))
+        subtitle_frame = subtitle_box.text_frame
+        subtitle_frame.clear()
+        subtitle_run = subtitle_frame.paragraphs[0].add_run()
+        subtitle_run.text = subtitle
+        _set_run_style(subtitle_run, size=18, bold=True, color=theme["accent"])
+
+        callout = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(4.08), Inches(4.35), Inches(6.65), Inches(1.05))
+        callout.fill.solid()
+        callout.fill.fore_color.rgb = RGBColor(255, 255, 255)
+        callout.line.color.rgb = RGBColor(*PPT_LINE)
+        callout_text = slide.shapes.add_textbox(Inches(4.35), Inches(4.58), Inches(6.05), Inches(0.46))
+        callout_frame = callout_text.text_frame
+        callout_frame.clear()
+        callout_run = callout_frame.paragraphs[0].add_run()
+        callout_run.text = "Same analysis, structured in split-column executive pages."
+        _set_run_style(callout_run, size=16, bold=True, color=theme["navy"])
+        _add_cover_body(slide, body, x=0.55, y=5.7, color=(220, 242, 235))
+        return
+
+    if theme["style"] == "editorial":
+        fill.fore_color.rgb = RGBColor(248, 250, 255)
+        header = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0), Inches(0), Inches(13.333), Inches(1.2))
+        header.fill.solid()
+        header.fill.fore_color.rgb = RGBColor(*theme["navy"])
+        header.line.fill.background()
+
+        accent = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0.82), Inches(1.52), Inches(1.1), Inches(0.1))
+        accent.fill.solid()
+        accent.fill.fore_color.rgb = RGBColor(*theme["accent"])
+        accent.line.fill.background()
+
+        title_box = slide.shapes.add_textbox(Inches(0.82), Inches(1.78), Inches(7.3), Inches(2.1))
+        frame = title_box.text_frame
+        frame.word_wrap = True
+        frame.clear()
+        run = frame.paragraphs[0].add_run()
+        run.text = title[:95]
+        _set_run_style(run, size=42, bold=True, color=theme["navy"])
+
+        subtitle_box = slide.shapes.add_textbox(Inches(0.86), Inches(4.02), Inches(5.9), Inches(0.46))
+        subtitle_frame = subtitle_box.text_frame
+        subtitle_frame.clear()
+        subtitle_run = subtitle_frame.paragraphs[0].add_run()
+        subtitle_run.text = subtitle
+        _set_run_style(subtitle_run, size=18, bold=True, color=theme["accent"])
+
+        for idx, label in enumerate(["Cards", "KPIs", "Tables"]):
+            card = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(8.25), Inches(1.75 + idx * 1.18), Inches(3.6), Inches(0.82))
+            card.fill.solid()
+            card.fill.fore_color.rgb = RGBColor(255, 255, 255)
+            card.line.color.rgb = RGBColor(*PPT_LINE)
+            box = slide.shapes.add_textbox(Inches(8.48), Inches(1.98 + idx * 1.18), Inches(3.0), Inches(0.24))
+            frame = box.text_frame
+            frame.clear()
+            run = frame.paragraphs[0].add_run()
+            run.text = label
+            _set_run_style(run, size=15, bold=True, color=theme["navy"])
+        _add_cover_body(slide, body, x=0.88, y=5.52, color=theme["muted"])
+        return
 
     accent = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0), Inches(0), Inches(0.22), Inches(7.5))
     accent.fill.solid()
-    accent.fill.fore_color.rgb = RGBColor(*PPT_TEAL)
+    accent.fill.fore_color.rgb = RGBColor(*theme["secondary"])
     accent.line.fill.background()
 
     band = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(7.85), Inches(0), Inches(5.48), Inches(7.5))
@@ -1279,8 +1518,101 @@ def _add_bullets(slide, bullets, top=2.58, left=0.82, width=11.75, size=None):
         _add_label_detail_runs(paragraph, bullet, size=size, label_color=PPT_BLUE)
 
 
-def _add_cards(slide, items):
+def _add_bullets_two_column(slide, bullets, template="financial_review"):
+    theme = _ppt_theme(template)
+    raw_bullets = [bullet for bullet in bullets if bullet]
+    bullets = _compact_bullets(raw_bullets, limit=6, char_limit=135)
+    columns = [bullets[:3], bullets[3:6]]
+    positions = [(0.82, 2.58), (6.82, 2.58)]
+    for column_index, column_items in enumerate(columns):
+        if not column_items:
+            continue
+        x, y = positions[column_index]
+        rail = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(x), Inches(y), Inches(0.06), Inches(3.82))
+        rail.fill.solid()
+        rail.fill.fore_color.rgb = RGBColor(*(theme["accent"] if column_index == 0 else theme["secondary"]))
+        rail.line.fill.background()
+
+        box = slide.shapes.add_textbox(Inches(x + 0.22), Inches(y), Inches(5.35), Inches(3.9))
+        frame = box.text_frame
+        frame.word_wrap = True
+        frame.margin_left = Inches(0.04)
+        frame.margin_right = Inches(0.04)
+        frame.clear()
+        for index, bullet in enumerate(column_items):
+            paragraph = frame.paragraphs[0] if index == 0 else frame.add_paragraph()
+            paragraph.space_after = Pt(15)
+            _add_label_detail_runs(paragraph, bullet, size=15.5, label_color=theme["accent"] if column_index == 0 else theme["secondary"])
+
+
+def _add_bullet_cards(slide, bullets, template="consulting_memo"):
+    theme = _ppt_theme(template)
+    items = _compact_bullets([bullet for bullet in bullets if bullet], limit=6, char_limit=110)
+    positions = [
+        (0.82, 2.55), (4.72, 2.55), (8.62, 2.55),
+        (0.82, 4.32), (4.72, 4.32), (8.62, 4.32),
+    ]
+    card_width = 3.45
+    card_height = 1.34
+    for index, item in enumerate(items):
+        x, y = positions[index]
+        card = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(x), Inches(y), Inches(card_width), Inches(card_height))
+        card.fill.solid()
+        card.fill.fore_color.rgb = RGBColor(255, 255, 255)
+        card.line.color.rgb = RGBColor(*theme["soft"])
+
+        accent = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(x), Inches(y), Inches(0.09), Inches(card_height))
+        accent.fill.solid()
+        accent.fill.fore_color.rgb = RGBColor(*(theme["accent"] if index % 2 == 0 else theme["secondary"]))
+        accent.line.fill.background()
+
+        text_box = slide.shapes.add_textbox(Inches(x + 0.22), Inches(y + 0.14), Inches(card_width - 0.38), Inches(card_height - 0.18))
+        frame = text_box.text_frame
+        frame.word_wrap = True
+        frame.clear()
+        paragraph = frame.paragraphs[0]
+        _add_label_detail_runs(paragraph, item, size=12.5, label_color=theme["accent"])
+
+
+def _add_cards(slide, items, template="strategy_brief"):
+    theme = _ppt_theme(template)
     items = _compact_bullets(items, limit=6, char_limit=120)
+    if template == "financial_review":
+        positions = [
+            (0.92, 2.55), (6.72, 2.55),
+            (0.92, 3.48), (6.72, 3.48),
+            (0.92, 4.41), (6.72, 4.41),
+        ]
+        card_width = 5.45
+        card_height = 0.74
+        for index, item in enumerate(items[:6]):
+            x, y = positions[index]
+            card = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(x), Inches(y), Inches(card_width), Inches(card_height))
+            card.fill.solid()
+            card.fill.fore_color.rgb = RGBColor(255, 255, 255)
+            card.line.color.rgb = RGBColor(*theme["soft"])
+
+            number = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(x), Inches(y), Inches(0.46), Inches(card_height))
+            number.fill.solid()
+            number.fill.fore_color.rgb = RGBColor(*(theme["accent"] if index % 2 == 0 else theme["secondary"]))
+            number.line.fill.background()
+
+            number_box = slide.shapes.add_textbox(Inches(x), Inches(y + 0.2), Inches(0.46), Inches(0.18))
+            number_frame = number_box.text_frame
+            number_frame.clear()
+            number_frame.paragraphs[0].alignment = PP_ALIGN.CENTER
+            number_run = number_frame.paragraphs[0].add_run()
+            number_run.text = str(index + 1)
+            _set_run_style(number_run, size=9, bold=True, color=(255, 255, 255))
+
+            text_box = slide.shapes.add_textbox(Inches(x + 0.62), Inches(y + 0.13), Inches(card_width - 0.8), Inches(card_height - 0.12))
+            frame = text_box.text_frame
+            frame.word_wrap = True
+            frame.clear()
+            paragraph = frame.paragraphs[0]
+            _add_label_detail_runs(paragraph, item, size=11.5, label_color=theme["accent"])
+        return
+
     if len(items) <= 3:
         card_width = 3.55
         card_height = 1.85
@@ -1303,11 +1635,11 @@ def _add_cards(slide, items):
         card = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(x), Inches(y), Inches(card_width), Inches(card_height))
         card.fill.solid()
         card.fill.fore_color.rgb = RGBColor(255, 255, 255)
-        card.line.color.rgb = RGBColor(*PPT_LINE)
+        card.line.color.rgb = RGBColor(*theme["soft"] if template == "consulting_memo" else PPT_LINE)
 
         number = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(x + 0.18), Inches(y + 0.16), Inches(0.33), Inches(0.33))
         number.fill.solid()
-        number.fill.fore_color.rgb = RGBColor(*(PPT_BLUE if index < 3 else PPT_TEAL))
+        number.fill.fore_color.rgb = RGBColor(*(theme["accent"] if index < 3 else theme["secondary"]))
         number.line.fill.background()
 
         number_box = slide.shapes.add_textbox(Inches(x + 0.18), Inches(y + 0.205), Inches(0.33), Inches(0.16))
@@ -1325,7 +1657,7 @@ def _add_cards(slide, items):
         frame.margin_right = Inches(0.02)
         frame.clear()
         paragraph = frame.paragraphs[0]
-        _add_label_detail_runs(paragraph, item, size=13.5, label_color=PPT_BLUE)
+        _add_label_detail_runs(paragraph, item, size=13.5, label_color=theme["accent"])
 
 
 def _add_swot_cards(slide, groups):
@@ -1377,7 +1709,8 @@ def _add_swot_cards(slide, groups):
         _set_run_style(body_run, size=11.5, color=PPT_INK)
 
 
-def _add_kpi_cards(slide, metrics):
+def _add_kpi_cards(slide, metrics, template="strategy_brief"):
+    theme = _ppt_theme(template)
     metrics = _compact_bullets(metrics, limit=5, char_limit=95)
     positions = [
         (0.78, 2.58), (3.25, 2.58), (5.72, 2.58), (8.19, 2.58), (10.66, 2.58),
@@ -1394,7 +1727,7 @@ def _add_kpi_cards(slide, metrics):
 
         badge = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(x + 0.18), Inches(y + 0.18), Inches(0.46), Inches(0.46))
         badge.fill.solid()
-        badge.fill.fore_color.rgb = RGBColor(*PPT_TEAL)
+        badge.fill.fore_color.rgb = RGBColor(*theme["accent"])
         badge.line.fill.background()
 
         badge_text = slide.shapes.add_textbox(Inches(x + 0.18), Inches(y + 0.25), Inches(0.46), Inches(0.2))
@@ -1415,7 +1748,7 @@ def _add_kpi_cards(slide, metrics):
         title_frame.clear()
         title_run = title_frame.paragraphs[0].add_run()
         title_run.text = _shorten_text(title, 32)
-        _set_run_style(title_run, size=15.5, bold=True, color=PPT_NAVY)
+        _set_run_style(title_run, size=15.5, bold=True, color=theme["navy"])
 
         body_box = slide.shapes.add_textbox(Inches(x + 0.22), Inches(y + 1.32), Inches(card_width - 0.44), Inches(0.95))
         body_frame = body_box.text_frame
@@ -1441,7 +1774,7 @@ def _risk_pair(text):
     return text, "Define owner, monitoring signal, and mitigation action."
 
 
-def _add_risk_mitigation(slide, risks):
+def _add_risk_mitigation(slide, risks, template="strategy_brief"):
     risks = _compact_bullets(risks, limit=4, char_limit=150)
     headers = ["Risk", "Mitigation"]
     rows = [_risk_pair(risk) for risk in risks]
@@ -1449,35 +1782,105 @@ def _add_risk_mitigation(slide, risks):
         "headers": headers,
         "rows": [[_shorten_text(risk, 92), _shorten_text(mitigation, 105)] for risk, mitigation in rows],
     }
-    _add_table_slide(slide, table_data)
+    if template == "consulting_memo":
+        _add_table_cards(slide, table_data, template)
+    else:
+        _add_table_slide(slide, table_data, template)
 
 
-def _add_table_slide(slide, table_data):
+def _table_shape_config(headers, rows):
+    col_count = len(headers)
+    financial_headers = {"metric", "latest value", "period / source", "business meaning"}
+    is_financial_table = financial_headers.issubset({header.lower() for header in headers})
+    if is_financial_table:
+        column_widths = [1.75, 2.05, 2.45, 5.8]
+        cell_limits = [28, 34, 34, 68]
+    elif col_count == 2:
+        column_widths = [3.15, 8.9]
+        cell_limits = [62, 110]
+    elif col_count == 3:
+        column_widths = [2.55, 4.35, 5.15]
+        cell_limits = [42, 72, 82]
+    elif col_count == 4:
+        column_widths = [1.75, 2.45, 3.15, 4.7]
+        cell_limits = [30, 42, 58, 68]
+    else:
+        column_widths = [12.05 / col_count] * col_count
+        cell_limits = [70] * col_count
+    return col_count, is_financial_table, column_widths, cell_limits
+
+
+def _add_table_cards(slide, table_data, template="consulting_memo"):
+    theme = _ppt_theme(template)
     headers = table_data.get("headers") or ["Segment", "Offering", "Customer Value", "Strategic Importance"]
-    rows = (table_data.get("rows") or [])[:7]
+    col_count, is_financial_table, _, cell_limits = _table_shape_config(headers, table_data.get("rows") or [])
+    max_rows = 5 if is_financial_table or col_count >= 4 else 6
+    rows = (table_data.get("rows") or [])[:max_rows]
+    if not rows:
+        rows = _fallback_analysis_table([], [], [], [])["rows"][:max_rows]
+
+    start_y = 2.48
+    row_gap = 0.12
+    card_height = min(0.74, (4.2 - (len(rows) - 1) * row_gap) / max(1, len(rows)))
+    for row_index, row in enumerate(rows):
+        y = start_y + row_index * (card_height + row_gap)
+        card = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(0.82), Inches(y), Inches(11.75), Inches(card_height))
+        card.fill.solid()
+        card.fill.fore_color.rgb = RGBColor(255, 255, 255)
+        card.line.color.rgb = RGBColor(*theme["soft"])
+
+        stripe = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0.82), Inches(y), Inches(0.12), Inches(card_height))
+        stripe.fill.solid()
+        stripe.fill.fore_color.rgb = RGBColor(*(theme["accent"] if row_index % 2 == 0 else theme["secondary"]))
+        stripe.line.fill.background()
+
+        title = _shorten_table_text(row[0] if row else "", 34)
+        title_box = slide.shapes.add_textbox(Inches(1.08), Inches(y + 0.13), Inches(2.05), Inches(card_height - 0.16))
+        title_frame = title_box.text_frame
+        title_frame.word_wrap = True
+        title_frame.clear()
+        title_run = title_frame.paragraphs[0].add_run()
+        title_run.text = title
+        _set_run_style(title_run, size=11.5, bold=True, color=theme["accent"])
+
+        details = []
+        for col_index in range(1, min(col_count, len(row))):
+            header = headers[col_index] if col_index < len(headers) else ""
+            value = _shorten_table_text(row[col_index], cell_limits[col_index] if col_index < len(cell_limits) else 56)
+            if value:
+                details.append(f"{header}: {value}")
+        detail_text = "   |   ".join(details[:3])
+        detail_box = slide.shapes.add_textbox(Inches(3.35), Inches(y + 0.12), Inches(8.85), Inches(card_height - 0.14))
+        detail_frame = detail_box.text_frame
+        detail_frame.word_wrap = True
+        detail_frame.clear()
+        detail_run = detail_frame.paragraphs[0].add_run()
+        detail_run.text = detail_text
+        _set_run_style(detail_run, size=10.5, color=PPT_INK)
+
+
+def _add_table_slide(slide, table_data, template="strategy_brief"):
+    theme = _ppt_theme(template)
+    headers = table_data.get("headers") or ["Segment", "Offering", "Customer Value", "Strategic Importance"]
+    col_count, is_financial_table, column_widths, cell_limits = _table_shape_config(headers, table_data.get("rows") or [])
+    max_rows = 5 if is_financial_table or col_count >= 4 else 6
+    rows = (table_data.get("rows") or [])[:max_rows]
 
     if not rows:
         rows = _fallback_analysis_table([], [], [], [])["rows"]
 
     row_count = len(rows) + 1
-    col_count = len(headers)
-    table_shape = slide.shapes.add_table(row_count, col_count, Inches(0.62), Inches(2.58), Inches(12.05), Inches(4.0))
+    table_top = 2.48
+    table_height = 4.25
+    table_shape = slide.shapes.add_table(row_count, col_count, Inches(0.62), Inches(table_top), Inches(12.05), Inches(table_height))
     table = table_shape.table
 
-    if col_count == 2:
-        column_widths = [3.15, 8.9]
-    elif col_count == 3:
-        column_widths = [2.55, 4.35, 5.15]
-    elif col_count == 4:
-        column_widths = [1.9, 2.7, 3.55, 3.9]
-    else:
-        column_widths = [12.05 / col_count] * col_count
-    table_font_size = 10.0 if row_count > 6 or col_count >= 4 else 11.0
+    table_font_size = 9.2 if col_count >= 4 else 10.5
     for index, width in enumerate(column_widths[:col_count]):
         table.columns[index].width = Inches(width)
 
-    header_height = 0.48
-    body_height = min(0.64, max(0.37, (4.0 - header_height) / max(1, len(rows))))
+    header_height = 0.54
+    body_height = max(0.62, (table_height - header_height) / max(1, len(rows)))
     table.rows[0].height = Inches(header_height)
     for row_index in range(1, row_count):
         table.rows[row_index].height = Inches(body_height)
@@ -1490,29 +1893,32 @@ def _add_table_slide(slide, table_data):
         cell.margin_top = Inches(0.04)
         cell.margin_bottom = Inches(0.04)
         cell.fill.solid()
-        cell.fill.fore_color.rgb = RGBColor(*PPT_NAVY)
+        cell.fill.fore_color.rgb = RGBColor(*theme["navy"])
         cell.vertical_anchor = MSO_ANCHOR.MIDDLE
         for paragraph in cell.text_frame.paragraphs:
             paragraph.alignment = PP_ALIGN.CENTER
             for run in paragraph.runs:
-                _set_run_style(run, size=11.5, bold=True, color=(255, 255, 255))
+                _set_run_style(run, size=10.8, bold=True, color=(255, 255, 255))
 
     for row_index, row in enumerate(rows, start=1):
         for col_index in range(col_count):
             value = row[col_index] if col_index < len(row) else ""
             cell = table.cell(row_index, col_index)
-            cell.text = _shorten_text(value, 120)
+            cell.text = _shorten_table_text(value, cell_limits[col_index] if col_index < len(cell_limits) else 70)
             cell.margin_left = Inches(0.07)
             cell.margin_right = Inches(0.07)
-            cell.margin_top = Inches(0.04)
-            cell.margin_bottom = Inches(0.04)
+            cell.margin_top = Inches(0.03)
+            cell.margin_bottom = Inches(0.03)
             cell.fill.solid()
-            cell.fill.fore_color.rgb = RGBColor(255, 255, 255) if row_index % 2 else RGBColor(242, 247, 252)
+            if template == "financial_review":
+                cell.fill.fore_color.rgb = RGBColor(255, 255, 255) if row_index % 2 else RGBColor(*theme["soft"])
+            else:
+                cell.fill.fore_color.rgb = RGBColor(255, 255, 255) if row_index % 2 else RGBColor(242, 247, 252)
             cell.vertical_anchor = MSO_ANCHOR.MIDDLE
             for paragraph in cell.text_frame.paragraphs:
                 paragraph.alignment = PP_ALIGN.LEFT
                 for run in paragraph.runs:
-                    _set_run_style(run, size=table_font_size, bold=(col_index == 0), color=PPT_BLUE if col_index == 0 else PPT_INK)
+                    _set_run_style(run, size=table_font_size, bold=(col_index == 0), color=theme["accent"] if col_index == 0 else PPT_INK)
 
 
 def _add_footer(slide, slide_number):
@@ -1537,104 +1943,134 @@ def _add_footer(slide, slide_number):
     _set_run_style(run, size=8.5, color=PPT_MUTED)
 
 
-def _write_pptx_report(file_path, query, answer, sources):
-    prs = Presentation()
-    prs.slide_width = Inches(13.333)
-    prs.slide_height = Inches(7.5)
-    blank_layout = prs.slide_layouts[6]
+def _slide_matches(slide_data, *terms):
+    haystack = " ".join([
+        slide_data.get("title", ""),
+        slide_data.get("subtitle", ""),
+        slide_data.get("kicker", ""),
+    ]).lower()
+    return any(term in haystack for term in terms)
 
-    sections = _build_ppt_sections(query, answer)
-    reference_labels = [_source_label(source) for source in sources]
+
+def _first_slide(slides, *terms):
+    for slide_data in slides:
+        if _slide_matches(slide_data, *terms):
+            return slide_data
+    return None
+
+
+def _dedupe_slides(slides, limit=6):
+    selected = []
+    seen = set()
+    for slide_data in slides:
+        if not slide_data:
+            continue
+        key = slide_data.get("title", "")
+        if key in seen:
+            continue
+        selected.append(slide_data)
+        seen.add(key)
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def _fallback_content_slides(sections):
+    summary_slide = {
+        "kind": "bullets",
+        "title": "Executive Summary Highlights The Main Decisions",
+        "subtitle": "Opportunity, positioning, risk, and recommendation",
+        "bullets": sections["summary"],
+        "kicker": "summary",
+    }
+    position_slide = {
+        "kind": "bullets",
+        "title": "Market Position Shows Where The Offer Can Win",
+        "subtitle": "Target segments, differentiation, and value logic",
+        "bullets": sections["market_position"],
+        "kicker": "position",
+    }
+    portfolio_slide = {
+        "kind": "cards",
+        "title": "Portfolio Snapshot Organizes The Core Offerings",
+        "subtitle": "Primary services, capabilities, and market components",
+        "items": sections["offerings"],
+        "kicker": "portfolio",
+    }
+    comparison_slide = {
+        "kind": "bullets",
+        "title": "Comparative Analysis Clarifies Strengths And Gaps",
+        "subtitle": "Competitive context, trade-offs, and buying criteria",
+        "bullets": sections["comparative"],
+        "kicker": "comparison",
+    }
+    strategy_slide = {
+        "kind": "bullets",
+        "title": "Strategic Moves Translate Analysis Into Action",
+        "subtitle": "Recommended actions and expected business impact",
+        "bullets": sections["strategy"],
+        "kicker": "strategy",
+    }
+    table_slide = {
+        "kind": "table",
+        "title": "Segment Table Connects Offerings To Value",
+        "subtitle": "Structured comparison across customers, offerings, and strategic importance",
+        "table": sections["table"],
+        "kicker": "table",
+    }
+    risk_slide = {
+        "kind": "risk_matrix",
+        "title": "Key Risks Need Clear Mitigation Paths",
+        "subtitle": "Key risks and practical controls",
+        "bullets": sections["risks"],
+        "kicker": "risk",
+    }
+    metric_slide = {
+        "kind": "kpi",
+        "title": "Success Metrics Show Whether The Portfolio Works",
+        "subtitle": "Indicators to track portfolio performance",
+        "bullets": sections["metrics"],
+        "kicker": "metrics",
+    }
+
+    return [summary_slide, position_slide, portfolio_slide, comparison_slide, strategy_slide, table_slide]
+
+
+def _template_content_slides(sections):
     extra_slides = sections.get("extra_slides") or []
+    if not extra_slides:
+        return _fallback_content_slides(sections)
 
-    if extra_slides:
-        slides = [
-            {
-                "kind": "cover",
-                "title": sections["title"],
-                "subtitle": "Market Portfolio Analysis",
-                "body": f"Prepared by Agentic Document Intelligence System\n{datetime.now().strftime('%d %b %Y, %I:%M %p')}",
-            },
-            *extra_slides,
-            {
-                "kind": "bullets",
-                "title": "Reference Sources",
-                "subtitle": "Kept separate from presentation content",
-                "bullets": reference_labels or ["No source references were returned for this response."],
-                "kicker": "sources",
-            },
-        ]
-    else:
-        slides = [
+    company = _first_slide(extra_slides, "company snapshot", "overview")
+    financial = _first_slide(extra_slides, "financial", "revenue", "profitability")
+    portfolio = _first_slide(extra_slides, "product portfolio", "portfolio")
+    market = _first_slide(extra_slides, "target market", "reach")
+    competition = _first_slide(extra_slides, "competition", "positioning")
+    growth = _first_slide(extra_slides, "growth", "strategic path")
+    risk = _first_slide(extra_slides, "risk")
+    metrics = _first_slide(extra_slides, "metrics")
+
+    candidates = [company, financial, portfolio, market, competition, growth or risk or metrics]
+    remaining = [slide for slide in extra_slides if slide not in candidates]
+    return _dedupe_slides([*candidates, *remaining], limit=6)
+
+
+def _build_ppt_slide_plan(sections, reference_labels, template):
+    template = _normalized_ppt_template(template)
+    template_names = {
+        "strategy_brief": "Classic Consulting Layout",
+        "financial_review": "Split-Column Layout",
+        "consulting_memo": "Card-Based Layout",
+    }
+    content_slides = _template_content_slides(sections)[:6]
+    return [
         {
             "kind": "cover",
             "title": sections["title"],
-            "subtitle": "Market Portfolio Analysis",
+            "subtitle": template_names[template],
             "body": f"Prepared by Agentic Document Intelligence System\n{datetime.now().strftime('%d %b %Y, %I:%M %p')}",
         },
-        {
-            "kind": "bullets",
-            "title": "This Portfolio Frames The Market Story",
-            "subtitle": "Context, scope, and presentation logic",
-            "bullets": sections["scope"],
-            "kicker": "context",
-        },
-        {
-            "kind": "bullets",
-            "title": "Executive Summary Highlights The Main Decisions",
-            "subtitle": "Opportunity, positioning, risk, and recommendation",
-            "bullets": sections["summary"],
-            "kicker": "summary",
-        },
-        {
-            "kind": "bullets",
-            "title": "Market Position Shows Where The Offer Can Win",
-            "subtitle": "Target segments, differentiation, and value logic",
-            "bullets": sections["market_position"],
-            "kicker": "position",
-        },
-        {
-            "kind": "cards",
-            "title": "Portfolio Snapshot Organizes The Core Offerings",
-            "subtitle": "Primary services, capabilities, and market components",
-            "items": sections["offerings"],
-            "kicker": "portfolio",
-        },
-        {
-            "kind": "bullets",
-            "title": "Comparative Analysis Clarifies Strengths And Gaps",
-            "subtitle": "Competitive context, trade-offs, and buying criteria",
-            "bullets": sections["comparative"],
-            "kicker": "comparison",
-        },
-        {
-            "kind": "bullets",
-            "title": "Strategic Moves Translate Analysis Into Action",
-            "subtitle": "Recommended actions and expected business impact",
-            "bullets": sections["strategy"],
-            "kicker": "strategy",
-        },
-        {
-            "kind": "table",
-            "title": "Segment Table Connects Offerings To Value",
-            "subtitle": "Structured comparison across customers, offerings, and strategic importance",
-            "table": sections["table"],
-            "kicker": "table",
-        },
-        {
-            "kind": "risk_matrix",
-            "title": "Key Risks Need Clear Mitigation Paths",
-            "subtitle": "Key risks and practical controls",
-            "bullets": sections["risks"],
-            "kicker": "risk",
-        },
-        {
-            "kind": "kpi",
-            "title": "Success Metrics Show Whether The Portfolio Works",
-            "subtitle": "Indicators to track portfolio performance",
-            "bullets": sections["metrics"],
-            "kicker": "metrics",
-        },
+        *content_slides,
         {
             "kind": "bullets",
             "title": "Reference Sources",
@@ -1642,28 +2078,50 @@ def _write_pptx_report(file_path, query, answer, sources):
             "bullets": reference_labels or ["No source references were returned for this response."],
             "kicker": "sources",
         },
-        ]
+    ][:8]
+
+
+def _write_pptx_report(file_path, query, answer, sources, template="strategy_brief"):
+    template = _normalized_ppt_template(template)
+    prs = Presentation()
+    prs.slide_width = Inches(13.333)
+    prs.slide_height = Inches(7.5)
+    blank_layout = prs.slide_layouts[6]
+
+    sections = _build_ppt_sections(query, answer)
+    reference_labels = [_source_label(source) for source in sources]
+    slides = _build_ppt_slide_plan(sections, reference_labels, template)
 
     for index, slide_data in enumerate(slides, start=1):
         slide = prs.slides.add_slide(blank_layout)
         if slide_data["kind"] == "cover":
-            _add_cover_slide(slide, slide_data["title"], slide_data["subtitle"], slide_data["body"])
+            _add_cover_slide(slide, slide_data["title"], slide_data["subtitle"], slide_data["body"], template)
             continue
 
-        _apply_slide_background(slide)
-        _add_title(slide, slide_data["title"], slide_data.get("subtitle"), slide_data.get("kicker", "analysis"))
+        _apply_slide_background(slide, template)
+        _add_title(slide, slide_data["title"], slide_data.get("subtitle"), slide_data.get("kicker", "analysis"), template)
         if slide_data["kind"] == "cards":
-            _add_cards(slide, slide_data["items"])
+            _add_cards(slide, slide_data["items"], template)
         elif slide_data["kind"] == "swot":
             _add_swot_cards(slide, slide_data["swot"])
         elif slide_data["kind"] == "kpi":
-            _add_kpi_cards(slide, slide_data["bullets"])
+            _add_kpi_cards(slide, slide_data["bullets"], template)
         elif slide_data["kind"] == "risk_matrix":
-            _add_risk_mitigation(slide, slide_data["bullets"])
+            _add_risk_mitigation(slide, slide_data["bullets"], template)
         elif slide_data["kind"] == "table":
-            _add_table_slide(slide, slide_data["table"])
+            if template == "consulting_memo":
+                _add_table_cards(slide, slide_data["table"], template)
+            else:
+                _add_table_slide(slide, slide_data["table"], template)
         elif "bullets" in slide_data:
-            _add_bullets(slide, slide_data["bullets"])
+            if slide_data.get("kicker") == "sources":
+                _add_bullets(slide, slide_data["bullets"])
+            elif template == "financial_review":
+                _add_bullets_two_column(slide, slide_data["bullets"], template)
+            elif template == "consulting_memo":
+                _add_bullet_cards(slide, slide_data["bullets"], template)
+            else:
+                _add_bullets(slide, slide_data["bullets"])
         else:
             _add_body(slide, slide_data["body"])
         _add_footer(slide, index)
@@ -1750,7 +2208,7 @@ async def ask_assistant(request: QueryRequest):
         except Exception as exc:
             print(f"Generated knowledge save skipped: {exc}")
 
-        _write_pptx_report(file_path, request.query, answer, sources)
+        _write_pptx_report(file_path, request.query, answer, sources, request.ppt_template)
         timings["format"] = round(time.perf_counter() - format_started_at, 4)
         timings["request_total"] = round(time.perf_counter() - request_started_at, 4)
         return FileResponse(
